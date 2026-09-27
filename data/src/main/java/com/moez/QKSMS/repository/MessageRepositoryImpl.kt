@@ -403,7 +403,7 @@ open class MessageRepositoryImpl @Inject constructor(
             }
             ?: 0
 
-    private fun syncProviderMessage(uri: Uri, sendAsGroup: Boolean): Message? {
+    override fun syncProviderMessage(uri: Uri, sendAsGroup: Boolean): Message? {
         // if uri doesn't have valid type
         val type = when {
             uri.toString().contains(TYPE_MMS) -> TYPE_MMS

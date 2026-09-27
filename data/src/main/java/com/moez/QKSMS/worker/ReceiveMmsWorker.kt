@@ -48,7 +48,9 @@ import dev.octoshrimpy.quik.interactor.UpdateBadge
 import dev.octoshrimpy.quik.manager.ActiveConversationManager
 import dev.octoshrimpy.quik.manager.NotificationManager
 import dev.octoshrimpy.quik.manager.ShortcutManager
+import dev.octoshrimpy.quik.model.Message
 import dev.octoshrimpy.quik.receiver.MessageSentReceiver
+import dev.octoshrimpy.quik.receiver.MmsDeliveryRegistrationReceiver
 import dev.octoshrimpy.quik.repository.ContactRepository
 import dev.octoshrimpy.quik.repository.ConversationRepository
 import dev.octoshrimpy.quik.repository.MessageContentFilterRepository
@@ -67,14 +69,47 @@ import javax.inject.Inject
 class ReceiveMmsWorker(appContext: Context, workerParams: WorkerParameters)
     : Worker(appContext, workerParams) {
     companion object {
-        const val INPUT_DATA_SUBSCRIPTION_ID = "subscriptionId"
-        const val INPUT_DATA_EXTRA_FILE_PATH = "filePath"
+        const val INPUT_DATA_SUBSCRIPTION_ID    = "subscriptionId"
+        const val INPUT_DATA_EXTRA_FILE_PATH    = "filePath"
         const val INPUT_DATA_EXTRA_LOCATION_URL = "locationUrl"
         const val INPUT_DATA_EXTRA_MMS_HTTP_STATUS = "mmsHttpStatus"
-        const val INPUT_DATA_EXTRA_URI = "extraUri"
+        const val INPUT_DATA_EXTRA_URI          = "extraUri"
 
         private const val LOCATION_SELECTION =
             Telephony.Mms.MESSAGE_TYPE + "=? AND " + Telephony.Mms.CONTENT_LOCATION + " =?"
+
+        // ── Public API consumed by third-party apps ────────────────────────────
+
+        /** Delivered to every registered receiver when a new MMS arrives. */
+        const val ACTION_MMS_RECEIVED = "dev.octoshrimpy.quik.action.MMS_RECEIVED"
+
+        /**
+         * Send an explicit broadcast carrying this action (targeted at
+         * [MmsDeliveryRegistrationReceiver]) to subscribe for MMS deliveries.
+         *
+         * Required extras: [EXTRA_RECEIVER_PACKAGE], [EXTRA_RECEIVER_CLASS]
+         */
+        const val ACTION_REGISTER_MMS_RECEIVER   = "dev.octoshrimpy.quik.action.REGISTER_MMS_RECEIVER"
+
+        /** Same as [ACTION_REGISTER_MMS_RECEIVER] but removes the subscription. */
+        const val ACTION_UNREGISTER_MMS_RECEIVER = "dev.octoshrimpy.quik.action.UNREGISTER_MMS_RECEIVER"
+
+        // Extras carried by ACTION_MMS_RECEIVED
+        const val EXTRA_MESSAGE_ID   = "extra_message_id"   // Long
+        const val EXTRA_THREAD_ID    = "extra_thread_id"    // Long
+        const val EXTRA_ADDRESS      = "extra_address"      // String  – sender
+        const val EXTRA_SUBJECT      = "extra_subject"      // String
+        const val EXTRA_TEXT         = "extra_text"         // String  – concatenated text parts
+        const val EXTRA_DATE_SENT    = "extra_date_sent"    // Long    (ms)
+        const val EXTRA_SUB_ID       = "extra_sub_id"       // Int
+        const val EXTRA_MESSAGE_URI  = "extra_message_uri"  // String  – content URI of the MMS
+
+        // Extras required in the registration broadcast
+        const val EXTRA_RECEIVER_PACKAGE = "extra_receiver_package"  // String
+        const val EXTRA_RECEIVER_CLASS   = "extra_receiver_class"    // String
+        //Added for sending MMS + potential photo to registered app (RadioMsg)
+        const val EXTRA_IMAGE_BYTES     = "extra_image_bytes"
+        const val EXTRA_IMAGE_MIME_TYPE = "extra_image_mime_type"
     }
 
     @Inject lateinit var activeConversationManager: ActiveConversationManager
@@ -228,6 +263,9 @@ class ReceiveMmsWorker(appContext: Context, workerParams: WorkerParameters)
                         // update the badge and widget
                         Timber.v("update badge and widget")
                         updateBadge.execute(Unit)
+
+                        // forward to any registered third-party apps
+                        deliverMmsToRegisteredApps(message)
                     }
 
                     // send ack to mmsc
@@ -251,6 +289,123 @@ class ReceiveMmsWorker(appContext: Context, workerParams: WorkerParameters)
         Timber.v("finished")
 
         return Result.success()
+    }
+
+
+    /**
+     * Finds the first image part of an MMS and returns its raw bytes + MIME type.
+     * Returns null if there is no image part or reading fails.
+     * Called from within QUIK, which already holds READ_SMS.
+     */
+
+    private fun extractMmsImageBytes(message: Message): Pair<ByteArray, String>? {
+
+        // getUri() may return "content://mms/7945/part" or "content://mms/7945"
+        // — find the first numeric path segment either way
+        val mmsUri = message.getUri()
+        val providerMsgId = mmsUri.pathSegments
+            .firstOrNull { it.toLongOrNull() != null }
+            ?.toLong() ?: run {
+            Timber.e("extractMmsImageBytes: no numeric segment in URI $mmsUri")
+            return null
+        }
+
+        val partsUri = Uri.parse("content://mms/$providerMsgId/part")
+        Timber.d("extractMmsImageBytes: querying $partsUri")
+
+        val cursor = applicationContext.contentResolver
+            .query(partsUri, null, null, null, null)
+
+        if (cursor == null) {
+            Timber.e("extractMmsImageBytes: null cursor for $partsUri")
+            return null
+        }
+
+        Timber.d("extractMmsImageBytes: cursor has ${cursor.count} rows")
+
+        cursor.use {
+            while (it.moveToNext()) {
+                val mimeType = it.getString(it.getColumnIndexOrThrow("ct"))
+                Timber.d("extractMmsImageBytes: part mime=$mimeType")
+
+                if (mimeType == null || !mimeType.startsWith("image/")) continue
+
+                val partId  = it.getLong(it.getColumnIndexOrThrow("_id"))
+                val partUri = Uri.parse("content://mms/part/$partId")
+                Timber.d("extractMmsImageBytes: reading image part $partUri")
+
+                return try {
+                    val bytes = applicationContext.contentResolver
+                        .openInputStream(partUri)
+                        ?.use { stream -> stream.readBytes() }
+
+                    if (bytes == null) {
+                        Timber.e("extractMmsImageBytes: null stream for $partUri")
+                        null
+                    } else {
+                        Timber.d("extractMmsImageBytes: got ${bytes.size} bytes, mime=$mimeType")
+                        Pair(bytes, mimeType)
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "extractMmsImageBytes: failed reading part $partUri")
+                    null
+                }
+            }
+        }
+
+        Timber.w("extractMmsImageBytes: no image part found in message ${message.id}")
+        return null
+    }
+
+    /**
+     * Sends a package-restricted broadcast to every app that registered via
+     * [MmsDeliveryRegistrationReceiver].
+     *
+     * Same intent strategy as [deliverSmsToRegisteredApps] — see that method
+     * for the full explanation of why [Intent.setPackage] is used instead of
+     * setClassName.
+     */
+    private fun deliverMmsToRegisteredApps(message: Message) {
+        val prefs = applicationContext.getSharedPreferences(
+            MmsDeliveryRegistrationReceiver.PREFS_NAME, Context.MODE_PRIVATE
+        )
+        val registered = prefs
+            .getStringSet(MmsDeliveryRegistrationReceiver.PREF_KEY_RECEIVERS, emptySet())
+            .orEmpty()
+
+        if (registered.isEmpty()) {
+            Timber.v("no third-party mms receivers registered")
+            return
+        }
+
+        val imageData = extractMmsImageBytes(message)
+
+        for (entry in registered) {
+            val slash = entry.indexOf('/')
+            if (slash < 0) { Timber.w("malformed mms receiver entry: $entry"); continue }
+
+            // entry is stored as "package/class" — we only need the package for setPackage()
+            val pkg = entry.substring(0, slash)
+
+            applicationContext.sendBroadcast(
+                Intent(ACTION_MMS_RECEIVED).apply {
+                    setPackage(pkg)             // restricts to this package; no process start
+                    putExtra(EXTRA_MESSAGE_ID, message.id)
+                    putExtra(EXTRA_THREAD_ID, message.threadId)
+                    putExtra(EXTRA_ADDRESS, message.address)
+                    putExtra(EXTRA_SUBJECT, message.getCleansedSubject())
+                    putExtra(EXTRA_TEXT, message.getText(withSubject = false))
+                    putExtra(EXTRA_DATE_SENT, message.dateSent)
+                    putExtra(EXTRA_SUB_ID, message.subId)
+                    putExtra(EXTRA_MESSAGE_URI, message.getUri().toString())
+                    imageData?.let { (bytes, mime) ->
+                        putExtra(EXTRA_IMAGE_BYTES, bytes)
+                        putExtra(EXTRA_IMAGE_MIME_TYPE, mime)
+                    }
+                }
+            )
+            Timber.v("mms broadcast sent to package: $pkg")
+        }
     }
 
     private fun handleHttpError(context: Context, mmsHttpStatus: Int, locationUrl: String) {

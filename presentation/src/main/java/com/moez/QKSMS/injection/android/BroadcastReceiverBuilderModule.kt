@@ -18,6 +18,8 @@
  */
 package dev.octoshrimpy.quik.injection.android
 
+import com.moez.QKSMS.receiver.RadioMmsReceiver
+import com.moez.QKSMS.receiver.RadioSmsReceiver
 import dagger.Module
 import dagger.android.ContributesAndroidInjector
 import dev.octoshrimpy.quik.feature.widget.WidgetProvider
@@ -120,4 +122,9 @@ abstract class BroadcastReceiverBuilderModule {
     @ContributesAndroidInjector
     abstract fun bindWidgetProvider(): WidgetProvider
 
+    @ContributesAndroidInjector
+    abstract fun radioMmsReceiver(): RadioMmsReceiver
+
+    @ContributesAndroidInjector
+    abstract fun radioSmsReceiver(): RadioSmsReceiver
 }

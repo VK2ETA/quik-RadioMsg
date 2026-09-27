@@ -106,4 +106,7 @@ interface MessageRepository {
     fun deduplicateMessages(): Flowable<DeduplicationResult>
 
     fun markAsSendingNow(messageId: Long)
+
+    //Added for external call for sending MMS
+    fun syncProviderMessage(uri: Uri, sendAsGroup: Boolean): Message?
 }

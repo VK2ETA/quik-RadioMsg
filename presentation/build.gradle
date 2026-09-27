@@ -29,7 +29,7 @@ android {
         minSdkVersion 23
         targetSdkVersion 33
         versionCode 2238
-        versionName '4.3.6'
+        versionName '4.3.6-for RadioMsg'
         setProperty("archivesBaseName", "QUIK-v${versionName}")
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -103,6 +103,11 @@ android {
         signingConfigs.release.storePassword = System.getenv("keystore_password")
         signingConfigs.release.keyAlias = System.getenv("key_alias")
         signingConfigs.release.keyPassword = System.getenv("key_password")
+    }
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 }
 
@@ -212,13 +217,16 @@ dependencies {
     implementation project(':data')
     implementation project(':domain')
 
+    //RadioMsg receivers
+    implementation 'com.googlecode.libphonenumber:libphonenumber:8.13.3'
+
 }
 // Check to make sure that the keystore file is present when building a release
-gradle.taskGraph.whenReady { taskGraph ->
-    if ((taskGraph.hasTask(':assembleRelease') ||
-            taskGraph.allTasks.any { it.name == 'assembleRelease' }) &&
-            !file('./.gradle/.gradlerc').exists() &&
-            System.getenv("CI") != "true") {
-        throw new GradleException("Keystore properties file not found")
-    }
-}
+//gradle.taskGraph.whenReady { taskGraph ->
+//    if ((taskGraph.hasTask(':assembleRelease') ||
+//            taskGraph.allTasks.any { it.name == 'assembleRelease' }) &&
+//            !file('${rootDir}/.gradle/.gradlerc').exists() &&
+//            System.getenv("CI") != "true") {
+//        throw new GradleException("Keystore properties file not found")
+//    }
+//}

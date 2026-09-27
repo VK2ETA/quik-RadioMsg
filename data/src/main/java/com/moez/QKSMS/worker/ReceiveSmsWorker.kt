@@ -19,6 +19,7 @@
 package dev.octoshrimpy.quik.worker
 
 import android.content.Context
+import android.content.Intent
 import androidx.work.ForegroundInfo
 import androidx.work.Worker
 import androidx.work.WorkerParameters
@@ -26,6 +27,8 @@ import dev.octoshrimpy.quik.blocking.BlockingClient
 import dev.octoshrimpy.quik.interactor.UpdateBadge
 import dev.octoshrimpy.quik.manager.NotificationManager
 import dev.octoshrimpy.quik.manager.ShortcutManager
+import dev.octoshrimpy.quik.model.Message
+import dev.octoshrimpy.quik.receiver.SmsDeliveryRegistrationReceiver
 import dev.octoshrimpy.quik.repository.ContactRepository
 import dev.octoshrimpy.quik.repository.ConversationRepository
 import dev.octoshrimpy.quik.repository.MessageContentFilterRepository
@@ -38,6 +41,34 @@ class ReceiveSmsWorker(appContext: Context, workerParams: WorkerParameters)
     : Worker(appContext, workerParams) {
     companion object {
         const val INPUT_DATA_KEY_MESSAGE_ID = "messageId"
+
+        // ── Public API consumed by third-party apps ────────────────────────────
+
+        /** Delivered to every registered receiver when a new SMS arrives. */
+        const val ACTION_SMS_RECEIVED = "dev.octoshrimpy.quik.action.SMS_RECEIVED"
+
+        /**
+         * Send an explicit broadcast carrying this action (targeted at
+         * [SmsDeliveryRegistrationReceiver]) to subscribe for SMS deliveries.
+         *
+         * Required extras: [EXTRA_RECEIVER_PACKAGE], [EXTRA_RECEIVER_CLASS]
+         */
+        const val ACTION_REGISTER_SMS_RECEIVER   = "dev.octoshrimpy.quik.action.REGISTER_SMS_RECEIVER"
+
+        /** Same as [ACTION_REGISTER_SMS_RECEIVER] but removes the subscription. */
+        const val ACTION_UNREGISTER_SMS_RECEIVER = "dev.octoshrimpy.quik.action.UNREGISTER_SMS_RECEIVER"
+
+        // Extras carried by ACTION_SMS_RECEIVED
+        const val EXTRA_MESSAGE_ID = "extra_message_id"   // Long
+        const val EXTRA_THREAD_ID  = "extra_thread_id"    // Long
+        const val EXTRA_ADDRESS    = "extra_address"      // String
+        const val EXTRA_BODY       = "extra_body"         // String
+        const val EXTRA_DATE_SENT  = "extra_date_sent"    // Long  (ms)
+        const val EXTRA_SUB_ID     = "extra_sub_id"       // Int
+
+        // Extras required in the registration broadcast
+        const val EXTRA_RECEIVER_PACKAGE = "extra_receiver_package"  // String
+        const val EXTRA_RECEIVER_CLASS   = "extra_receiver_class"    // String
     }
 
     @Inject lateinit var conversationRepo: ConversationRepository
@@ -126,9 +157,60 @@ class ReceiveSmsWorker(appContext: Context, workerParams: WorkerParameters)
         Timber.v("update badge and widget")
         updateBadge.execute(Unit)
 
+        // forward to any registered third-party apps
+        deliverSmsToRegisteredApps(message)
+
         Timber.v("finished")
 
         return Result.success()
+    }
+
+    /**
+     * Sends a package-restricted broadcast to every app that registered via
+     * [SmsDeliveryRegistrationReceiver].
+     *
+     * Using [Intent.setPackage] (not setClassName) is deliberate:
+     *   - It restricts delivery to the target package only, so no other app
+     *     can intercept it.
+     *   - Because no explicit component is named, Android does NOT start the
+     *     target process if it is not already running. The broadcast is
+     *     silently dropped when the app is dead, which is exactly what we want.
+     *   - The client app must register its receiver dynamically (in code) so
+     *     it is only live while the process is alive.
+     */
+    private fun deliverSmsToRegisteredApps(message: Message) {
+        val prefs = applicationContext.getSharedPreferences(
+            SmsDeliveryRegistrationReceiver.PREFS_NAME, Context.MODE_PRIVATE
+        )
+        val registered = prefs
+            .getStringSet(SmsDeliveryRegistrationReceiver.PREF_KEY_RECEIVERS, emptySet())
+            .orEmpty()
+
+        if (registered.isEmpty()) {
+            Timber.v("no third-party sms receivers registered")
+            return
+        }
+
+        for (entry in registered) {
+            val slash = entry.indexOf('/')
+            if (slash < 0) { Timber.w("malformed sms receiver entry: $entry"); continue }
+
+            // entry is stored as "package/class" — we only need the package for setPackage()
+            val pkg = entry.substring(0, slash)
+
+            applicationContext.sendBroadcast(
+                Intent(ACTION_SMS_RECEIVED).apply {
+                    setPackage(pkg)            // restricts to this package; no process start
+                    putExtra(EXTRA_MESSAGE_ID, message.id)
+                    putExtra(EXTRA_THREAD_ID,  message.threadId)
+                    putExtra(EXTRA_ADDRESS,    message.address)
+                    putExtra(EXTRA_BODY,       message.body)
+                    putExtra(EXTRA_DATE_SENT,  message.dateSent)
+                    putExtra(EXTRA_SUB_ID,     message.subId)
+                }
+            )
+            Timber.v("sms broadcast sent to package: $pkg")
+        }
     }
 
     override fun getForegroundInfo() = ForegroundInfo(

@@ -45,6 +45,21 @@
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
+    <!-- Silent SMS and MMS RadioMsg send and receive
+     Only RadioMsg can send and receive -->
+    <permission
+        android:name="com.quik.permission.SEND_RADIO_SMS"
+        android:protectionLevel="signature" />
+    <permission
+        android:name="com.quik.permission.SEND_RADIO_MMS"
+        android:protectionLevel="signature" />
+    <permission
+        android:name="com.quik.permission.SMS_DELIVERY_REGISTRATION"
+        android:protectionLevel="signature" />
+    <permission
+        android:name="com.quik.permission.MMS_DELIVERY_REGISTRATION"
+        android:protectionLevel="signature" />
+
     <application
         android:name=".common.QKApplication"
         android:allowBackup="false"
@@ -182,6 +197,46 @@
             </intent-filter>
         </receiver>
         <receiver android:name=".receiver.ResendMessageReceiver" />
+        <!-- Silent SMS send via intent. Secured call from RadioMSG app  -->
+        <receiver
+            android:name="com.moez.QKSMS.receiver.RadioSmsReceiver"
+            android:permission="com.quik.permission.SEND_RADIO_SMS"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.quik.sms.action.SEND_BACKGROUND_SMS" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name="com.moez.QKSMS.receiver.RadioMmsReceiver"
+            android:permission="com.quik.permission.SEND_RADIO_MMS"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.quik.sms.action.SEND_BACKGROUND_MMS" />
+            </intent-filter>
+        </receiver>
+        <!--
+            Third-party apps send an explicit broadcast to these receivers
+            to subscribe / unsubscribe for SMS and MMS delivery notifications.
+            They must be exported so external processes can reach them.
+        -->
+        <receiver
+            android:name=".receiver.SmsDeliveryRegistrationReceiver"
+            android:permission="com.quik.permission.SMS_DELIVERY_REGISTRATION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.octoshrimpy.quik.action.REGISTER_SMS_RECEIVER" />
+                <action android:name="dev.octoshrimpy.quik.action.UNREGISTER_SMS_RECEIVER" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".receiver.MmsDeliveryRegistrationReceiver"
+            android:permission="com.quik.permission.MMS_DELIVERY_REGISTRATION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.octoshrimpy.quik.action.REGISTER_MMS_RECEIVER" />
+                <action android:name="dev.octoshrimpy.quik.action.UNREGISTER_MMS_RECEIVER" />
+            </intent-filter>
+        </receiver>
         <receiver
             android:name=".feature.widget.WidgetSpeakUnseenProvider"
             android:label="@string/speak_unseen_messages"
@@ -208,7 +263,6 @@
                 android:resource="@xml/widget_info" />
         </receiver>
         <receiver android:name=".receiver.StartActivityFromWidgetReceiver" />
-
         <service android:name="com.android.mms.transaction.TransactionService" />
         <service android:name=".feature.backup.RestoreBackupService" />
         <service
@@ -264,6 +318,7 @@
     </application>
 
     <queries>
+        <package android:name="dev.octoshrimpy.quik" />  <!-- corrected package name -->
         <package android:name="com.cuiet.blockCalls" />
         <package android:name="com.flexaspect.android.everycallcontrol" />
         <package android:name="org.mistergroup.muzutozvednout" />
